@@ -1,6 +1,6 @@
 // Service worker do Corre em Dia: guarda o app no celular para abrir sem internet.
 // Ao mudar o app, aumente a VERSAO para os celulares baixarem a nova.
-const VERSAO = "corre-v1";
+const VERSAO = "corre-v2";
 const ARQUIVOS = ["./", "index.html", "manifest.json", "icons/icon-192.png", "icons/icon-512.png", "icons/maskable-512.png"];
 
 self.addEventListener("install", e => {

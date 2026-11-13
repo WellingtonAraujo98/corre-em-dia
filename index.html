@@ -197,7 +197,7 @@ function normalize(d){
   s.contas=Array.isArray(s.contas)?s.contas:[];
   for(const c of s.contas){if(!c.tipo)c.tipo="mensal";if(!c.valores||typeof c.valores!=="object")c.valores={}}
   s.metas=Array.isArray(s.metas)?s.metas:[];
-  for(const m of s.metas){if(!Array.isArray(m.movs))m.movs=[];m.guardado=+m.guardado||0}
+  for(const m of s.metas){if(!Array.isArray(m.movs))m.movs=[];m.guardado=+m.guardado||0;m.valor=+m.valor||0;if(!/^\d{4}-\d{2}$/.test(m.alvo||""))m.alvo=ymOf(new Date())}
   s.pagos=s.pagos&&typeof s.pagos==="object"?s.pagos:{};
   s.reserva=Object.assign({saldo:0,movs:[]},s.reserva||{});
   if(!Array.isArray(s.reserva.movs))s.reserva.movs=[];
@@ -248,12 +248,15 @@ function weekRange(off){
   const end=new Date(start.getFullYear(),start.getMonth(),start.getDate()+6,23,59,59);
   return{start,end};
 }
+/* Contas vencidas e não pagas: mensais dos últimos 3 meses e semanais das últimas 4 semanas,
+   nunca antes do dia em que a pessoa começou a usar o app (config.desde). */
 function atrasadas(){
   const t=new Date();const today0=new Date(t.getFullYear(),t.getMonth(),t.getDate());
   let start=new Date(t.getFullYear(),t.getMonth()-3,1);
-  const desde=state.config.desde||"2026-11-01";const[dy,dm,dd]=desde.split("-").map(Number);const ds=new Date(dy,dm-1,dd);if(ds>start)start=ds;
+  const desde=state.config.desde||isoDay(today0);const[dy,dm,dd]=desde.split("-").map(Number);const ds=new Date(dy,dm-1,dd);if(ds>start)start=ds;
+  const semStart=addDays(today0,-28);
   const end=new Date(t.getFullYear(),t.getMonth()+1,0,23,59,59);
-  return occurrences(start,end).filter(o=>!o.pago&&!semanal(o.c)&&o.venc<today0);
+  return occurrences(start,end).filter(o=>!o.pago&&o.venc<today0&&(!semanal(o.c)||o.venc>=semStart));
 }
 const daysUntil=d=>Math.round((noon(d)-noon(new Date()))/864e5);
 /* quantas vezes o dia da semana (0=dom..6=sáb) aparece no mês */
@@ -271,22 +274,23 @@ const custoVidaMensal=()=>{
   return fixas+semanalMensal(ym)+(+state.config.variaveisSemana||0)*52/12+futuros;
 };
 function metaInfo(m){
-  const t=noon(new Date());const[ay,am]=(m.alvo||ymOf(t)).split("-").map(Number);const alvo=new Date(ay,am-1,1,12);
+  // prazo = ÚLTIMO dia do mês escolhido (meta para "julho" vale até 31/jul)
+  const t=noon(new Date());const[ay,am]=(m.alvo||ymOf(t)).split("-").map(Number);const alvo=new Date(ay,am,0,12);
   const falta=Math.max(0,(+m.valor||0)-(+m.guardado||0));
   const semanas=Math.max(1,Math.ceil((alvo-t)/(7*864e5)));
-  const vencida=alvo<=t;
-  const porSemana=falta>0?falta/semanas:0;
+  const vencida=alvo<t;
+  const porSemana=falta>0&&!vencida?falta/semanas:0;
   // ritmo: quanto já deveria ter, contando da criação até o mês alvo
   const ini=m.criado?new Date(m.criado+"T12:00:00"):t;
   const totalDias=Math.max(1,(alvo-ini)/864e5),passou=Math.min(totalDias,Math.max(0,(t-ini)/864e5));
   const esperado=(+m.valor||0)*passou/totalDias;
   return{falta,semanas,porSemana,porMes:porSemana*52/12,vencida,ok:falta<=0,atras:(+m.guardado||0)+1<esperado,esperado};
 }
-const metasMensalAte=ym=>state.metas.reduce((s,m)=>{const i=metaInfo(m);return s+(!i.ok&&m.alvo&&ym<m.alvo?i.porMes:0)},0);
+const metasMensalAte=ym=>state.metas.reduce((s,m)=>{const i=metaInfo(m);return s+(!i.ok&&m.alvo&&ym<=m.alvo?i.porMes:0)},0);
 
 /* ---------- salvar ---------- */
 function persist(){
-  if(!db){try{localStorage.setItem(LS,JSON.stringify(state))}catch(e){}setSync("salvo neste aparelho");return}
+  if(!db){try{localStorage.setItem(LS,JSON.stringify(state))}catch(e){}setSync("salvo neste celular");return}
   dirty=true;setSync("salvando…");clearTimeout(saveTimer);saveTimer=setTimeout(flush,350);
 }
 async function flush(){
@@ -341,8 +345,13 @@ function renderSemana(){
   const total=sum(occ),pago=sum(occ.filter(o=>o.pago));
   const wk=occ.filter(o=>semanal(o.c)),mes=occ.filter(o=>!semanal(o.c));
   let html="";
-  if(weekOffset===0){const late=atrasadas();
-    if(late.length)html+=`<div class="card alert"><div class="spread"><h3>Ficou pra trás</h3><b class="num">${brl(sum(late))}</b></div><div>${late.map(o=>billRow(o)).join("")}</div></div>`;}
+  if(weekOffset===0){
+    // o que já aparece na lista desta semana não se repete aqui
+    const naSemana=new Set(occ.map(o=>o.key));const late=atrasadas().filter(o=>!naSemana.has(o.key));
+    if(late.length)html+=`<div class="card alert"><div class="spread"><h3>Ficou pra trás</h3><b class="num">${brl(sum(late))}</b></div><div>${late.map(o=>billRow(o)).join("")}</div></div>`;
+    const ult=state.config.ultimoBackup,diasBk=ult?Math.round((noon(new Date())-new Date(ult+"T12:00:00"))/864e5):null;
+    if(state.contas.length>=3&&(ult==null||diasBk>30))html+=`<div class="card hint"><div class="spread"><h3>Faça um backup</h3><a class="linkbtn" href="#reserva">Ir para o backup</a></div><p class="small">${ult==null?"Você ainda não salvou nenhum backup.":"O último backup foi há "+diasBk+" dias."} Os dados ficam só neste celular: se ele quebrar ou o navegador for limpo, o backup traz tudo de volta.</p></div>`;
+  }
   html+=`<div class="card"><div class="totals"><div class="tot"><span>Semana</span><b class="num">${brl0(total)}</b></div><div class="tot pago"><span>Pago</span><b class="num">${brl0(pago)}</b></div><div class="tot falta"><span>Falta</span><b class="num">${brl0(total-pago)}</b></div></div></div>`;
   html+=`<div class="card"><div class="spread"><h2>Contas do mês</h2>${occ.length?`<button class="linkbtn" data-act="copy">Copiar lista</button>`:""}</div>
   <p class="small muted">Datas pelo seu plano de adiantamento (${adiant()} dia${adiant()===1?"":"s"} antes do vencimento).</p>
@@ -361,11 +370,14 @@ function gcalLink(c){
   const f=x=>x.getFullYear()+pad(x.getMonth()+1)+pad(x.getDate());
   const t=noon(new Date());let d,rule;
   if(semanal(c)){d=addDays(t,((+c.diaSemana||0)-t.getDay()+7)%7);rule="RRULE:FREQ=WEEKLY";}
-  else{let y=t.getFullYear(),m=t.getMonth();d=dueIn(c,y,m);if(d<t){m++;if(m>11){m=0;y++}d=dueIn(c,y,m)}
-    if(c.inicio&&ymOf(d)<c.inicio){const[iy,im]=c.inicio.split("-").map(Number);d=dueIn(c,iy,im-1)}
-    rule="RRULE:FREQ=MONTHLY;BYMONTHDAY="+(Number(c.dia)>=31?-1:Number(c.dia));}
+  else{// lembrete no dia do PLANO (vencimento menos o adiantamento), não no vencimento
+    let y=t.getFullYear(),m=t.getMonth();d=planIn(c,y,m);if(d<t){m++;if(m>11){m=0;y++}d=planIn(c,y,m)}
+    if(c.inicio&&ymOf(d)<c.inicio){const[iy,im]=c.inicio.split("-").map(Number);d=planIn(c,iy,im-1)}
+    const pd=Math.max(metaDia(c),Math.min(+c.dia,31)-adiant());
+    rule="RRULE:FREQ=MONTHLY;BYMONTHDAY="+(pd>=31?-1:pd);}
   if(c.fim){const[fy,fm]=c.fim.split("-").map(Number);rule+=";UNTIL="+f(new Date(fy,fm,0))}
-  const p=new URLSearchParams({action:"TEMPLATE",text:"Pagar: "+c.nome,dates:f(d)+"/"+f(addDays(d,1)),details:"Lembrete do Corre em Dia. Confira o valor do mês no app.",recur:rule});
+  const det=semanal(c)?"Lembrete do Corre em Dia.":"Lembrete do Corre em Dia. Vence todo dia "+c.dia+". Se mudar o adiantamento no app, crie o lembrete de novo.";
+  const p=new URLSearchParams({action:"TEMPLATE",text:"Pagar: "+c.nome+(semanal(c)?"":" (vence dia "+c.dia+")"),dates:f(d)+"/"+f(addDays(d,1)),details:det,recur:rule});
   return "https://calendar.google.com/calendar/render?"+p.toString();
 }
 function monthWindow(){const ym0=ymOf(new Date());return Array.from({length:12},(_,i)=>addMonthsYm(ym0,i))}
@@ -442,7 +454,7 @@ function renderContas(){
     const tot=g==="wk"?semanalMensal(ym):list.filter(c=>ativa(c,ym)).reduce((s,c)=>s+valorEm(c,ym),0);
     html+=`<div class="grouphead ${g}"><h3>${BLOCO[g]}</h3><b class="num">${brl0(tot)}${g==="wk"?" no mês":""}</b></div><p class="small muted">${desc[g]}</p><div>${list.map(c=>contaCard(c,ym)).join("")}</div>`;
   }
-  html+=`</div><div class="card hint"><h3>Lembrete no celular</h3><p class="small">“Lembrete no Google Agenda” cria um evento que repete no dia do vencimento (ou toda semana) e para na última parcela. Salve e o celular avisa sozinho.</p></div>`;
+  html+=`</div><div class="card hint"><h3>Lembrete no celular</h3><p class="small">“Lembrete no Google Agenda” cria um evento que repete no dia do seu plano de pagamento (vencimento menos os dias de adiantamento) ou toda semana, e para na última parcela. Se mudar o adiantamento, crie os lembretes de novo.</p></div>`;
   return html;
 }
 
@@ -511,7 +523,7 @@ function renderMetas(){
       <div class="spread"><b style="font-family:var(--f-body);font-size:16px;line-height:1.3">${esc(m.nome)}</b>${st}</div>
       <div class="spread small"><span class="muted">${brl0(m.guardado)} de ${brl0(m.valor)}</span><span class="muted">até ${ymLabel(m.alvo)}</span></div>
       <div class="bar"><i style="width:${pct.toFixed(1)}%"></i></div>
-      ${i.ok?"":`<p class="small">Guarde <b class="num">${brl0(i.porSemana)}</b> por semana (${brl0(i.porMes)}/mês) por ${i.semanas} semana${i.semanas===1?"":"s"}.</p>`}
+      ${i.ok||i.vencida?"":`<p class="small">Guarde <b class="num">${brl0(i.porSemana)}</b> por semana (${brl0(i.porMes)}/mês) por ${i.semanas} semana${i.semanas===1?"":"s"}.</p>`}
       ${m.gastoMensal>0?`<p class="small muted">A partir de ${ymLabel(m.alvo)}: +${brl0(m.gastoMensal)}/mês nas contas.</p>`:""}
       <form class="row" data-meta="${m.id}"><label style="flex:1 1 120px">Valor (R$)<input id="mm-${m.id}" inputmode="decimal" placeholder="100,00"></label>
       <div class="row" style="align-self:flex-end"><button class="btn sign" type="submit">Guardei</button><button class="btn ghost" type="button" data-act="mtirar" data-id="${m.id}">Tirei</button></div></form>
@@ -526,6 +538,7 @@ function renderMetas(){
 function metaMov(id,dir){
   const m=state.metas.find(x=>x.id===id);const el=document.getElementById("mm-"+id);const v=parseMoney(el&&el.value);
   if(!m)return;if(!(v>0)){toast("Digite um valor, ex.: 100,00");return}
+  if(dir<0&&v>(+m.guardado||0)){toast("Nessa meta só tem "+brl(m.guardado)+" guardado");return}
   m.guardado=Math.round(((+m.guardado||0)+dir*v)*100)/100;m.movs.push({data:isoDay(new Date()),valor:dir*v});
   if(m.movs.length>200)m.movs=m.movs.slice(-200);persist();render();toast(dir>0?"Guardado em “"+m.nome+"”":"Retirada registrada");
 }
@@ -582,13 +595,21 @@ function renderBackup(){
   const aviso=!state.contas.length?"":ult==null?`<span class="chip warn">nunca fez backup</span>`:dias>30?`<span class="chip warn">último há ${dias} dias</span>`:`<span class="chip ok">último em ${ult.split("-").reverse().join("/")}</span>`;
   return `<div class="card"><div class="spread"><h2>Backup</h2>${aviso}</div>
   <p class="small muted">Os dados ficam só neste celular. Salve um backup de vez em quando (mande para você no WhatsApp ou no Drive). Se trocar de celular ou limpar o navegador, é ele que traz tudo de volta.</p>
-  <div class="row"><button class="btn sign" data-act="exportar">Salvar backup</button>
+  <div class="row"><button class="btn sign" data-act="exportar">Salvar backup</button>${podeCompartilhar()?`<button class="btn ghost" data-act="compartilhar">Enviar (WhatsApp, Drive…)</button>`:""}
   <label class="btn ghost" style="flex-direction:row;align-items:center;color:var(--ink);font-size:15px">Restaurar backup<input type="file" id="f-import" accept=".json,application/json" hidden></label></div>
   ${importPend?`<div class="confirm"><span class="small">Restaurar o backup de ${esc(importPend.data)} com ${importPend.s.contas.length} contas? Isso troca tudo o que está neste celular.</span><button class="btn danger" data-act="importok">Restaurar</button><button class="btn ghost" data-act="importno">Cancelar</button></div>`:""}</div>`;
 }
+const backupNome=()=>"corre-em-dia-backup-"+isoDay(new Date())+".json";
+const backupTexto=()=>JSON.stringify({app:"corre-em-dia",exportado:new Date().toISOString(),estado:state},null,1);
+function podeCompartilhar(){try{return !!(navigator.canShare&&navigator.canShare({files:[new File(["{}"],"t.json",{type:"application/json"})]}))}catch(e){return false}}
+async function compartilhar(){
+  const file=new File([backupTexto()],backupNome(),{type:"application/json"});
+  try{await navigator.share({files:[file],title:"Backup Corre em Dia"});state.config.ultimoBackup=isoDay(new Date());persist();render();toast("Backup enviado")}
+  catch(e){if(e&&e.name!=="AbortError")toast("Não deu para enviar. Use “Salvar backup”.")}
+}
 function exportar(){
   state.config.ultimoBackup=isoDay(new Date());persist();
-  const blob=new Blob([JSON.stringify({app:"corre-em-dia",exportado:new Date().toISOString(),estado:state},null,1)],{type:"application/json"});
+  const blob=new Blob([backupTexto()],{type:"application/json"});
   const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="corre-em-dia-backup-"+isoDay(new Date())+".json";
   document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},1000);
   render();toast("Backup salvo em Downloads");
@@ -611,7 +632,16 @@ function render(){
   try{v.innerHTML=tab==="semana"?renderSemana():tab==="contas"?renderContas():renderReserva()}
   catch(err){v.innerHTML=`<div class="card alert"><h3>Algo deu errado</h3><p class="small">Mande este texto para o Claude: ${esc(err&&err.message||err)}</p></div>`}
 }
-const parseMoney=s=>{s=String(s??"").trim().replace(/[R$\s]/g,"");if(s==="")return NaN;if(s.includes(","))s=s.replace(/\./g,"").replace(",",".");const n=parseFloat(s);return isFinite(n)?Math.round(n*100)/100:NaN};
+/* Lê valores como o brasileiro digita: "1.200" = mil e duzentos, "1.200,50", "150,5", "R$ 50".
+   Também aceita "1,234.56" (formato americano) e "10.5" (decimal com ponto). */
+const parseMoney=s=>{
+  s=String(s??"").trim().replace(/[R$\s]/g,"");if(s==="")return NaN;
+  const lc=s.lastIndexOf(","),ld=s.lastIndexOf(".");
+  if(lc>-1&&ld>-1)s=lc>ld?s.replace(/\./g,"").replace(",","."):s.replace(/,/g,"");
+  else if(lc>-1)s=s.replace(/\./g,"").replace(",",".");
+  else if(/^-?\d{1,3}(\.\d{3})+$/.test(s))s=s.replace(/\./g,"");
+  if(!/^-?\d+(\.\d+)?$/.test(s))return NaN;
+  const n=parseFloat(s);return isFinite(n)?Math.round(n*100)/100:NaN};
 function readForm(){const g=id=>{const el=document.getElementById(id);return el?el.value:""};const out={nome:g("f-nome"),valor:g("f-valor"),dia:g("f-dia"),fim:g("f-fim"),inicio:g("f-inicio"),ds:g("f-ds"),meses:{}};for(const ym of monthWindow())out.meses[ym]=g("fv-"+ym);return out}
 function restoreForm(v){const set=(id,val)=>{const el=document.getElementById(id);if(el)el.value=val};set("f-nome",v.nome);set("f-valor",v.valor);set("f-dia",v.dia);set("f-fim",v.fim);set("f-inicio",v.inicio);set("f-ds",v.ds);for(const[k,val]of Object.entries(v.meses))set("fv-"+k,val)}
 
@@ -630,8 +660,9 @@ document.addEventListener("click",async e=>{
   if(a==="adv"){state.config.adiantamento=Math.min(precisa(),Math.max(0,adiant()+(+b.dataset.n)));persist();render();toast("Agora: "+adiant()+" dia(s) antes do vencimento");return}
   if(a==="tirar"){mov(-1);return}
   if(a==="exportar"){exportar();return}
+  if(a==="compartilhar"){compartilhar();return}
   if(a==="importno"){importPend=null;render();return}
-  if(a==="importok"){state=importPend.s;importPend=null;persist();render();toast("Backup restaurado");return}
+  if(a==="importok"){state=importPend.s;if(!state.config.desde)state.config.desde=state.contas.length?"2026-11-01":isoDay(new Date());importPend=null;persist();render();toast("Backup restaurado");return}
   if(a==="mnew"){editMeta="new";confirmMeta=null;render();return}
   if(a==="medit"){editMeta=b.dataset.id;confirmMeta=null;render();return}
   if(a==="mcancel"){editMeta=null;render();return}
@@ -644,6 +675,7 @@ document.addEventListener("click",async e=>{
     try{await navigator.clipboard.writeText(txt);toast("Lista copiada")}catch(err){toast("Não deu para copiar aqui")}return}
 });
 function mov(dir){const el=document.getElementById("m-valor");const v=parseMoney(el&&el.value);if(!(v>0)){toast("Digite um valor, ex.: 50,00");return}
+  if(dir<0&&v>(+state.reserva.saldo||0)){toast("Na reserva só tem "+brl(state.reserva.saldo));return}
   state.reserva.saldo=Math.round(((+state.reserva.saldo||0)+dir*v)*100)/100;state.reserva.movs.push({data:isoDay(new Date()),valor:dir*v});
   if(state.reserva.movs.length>200)state.reserva.movs=state.reserva.movs.slice(-200);persist();render();toast(dir>0?"Guardado na reserva":"Retirada registrada")}
 document.addEventListener("submit",e=>{
@@ -655,6 +687,8 @@ document.addEventListener("submit",e=>{
     if(!nome){toast("Dê um nome para a meta");return}
     if(!(valor>0)){toast("Valor inválido. Ex.: 6000");return}
     if(!/^\d{4}-\d{2}$/.test(alvo)){toast("Escolha o mês da meta");return}
+    const antes=editMeta!=="new"?state.metas.find(x=>x.id===editMeta):null;
+    if(alvo<ymOf(new Date())&&(!antes||antes.alvo!==alvo)){toast("O prazo da meta não pode ser um mês que já passou");return}
     const data={nome,valor,alvo,gastoMensal:gasto>0?gasto:0};
     if(editMeta==="new")state.metas.push(Object.assign({id:uid(),guardado:0,movs:[],criado:isoDay(new Date())},data));
     else{const m=state.metas.find(x=>x.id===editMeta);if(m)Object.assign(m,data)}
@@ -679,6 +713,9 @@ addEventListener("hashchange",route);
 route();
 /* versão app (PWA): dados ficam só neste aparelho, no localStorage */
 try{const raw=localStorage.getItem(LS);if(raw)state=normalize(JSON.parse(raw))}catch(e){toast("Não consegui ler os dados salvos")}
+// data em que a pessoa começou a usar: "Ficou pra trás" nunca mostra nada antes disso.
+// Quem já tinha contas antes desta versão (nov/2026) fica com 01/11/2026.
+if(!state.config.desde){state.config.desde=state.contas.length?"2026-11-01":isoDay(new Date());persist()}
 loaded=true;setSync("salvo neste celular");render();
 try{if(navigator.storage&&navigator.storage.persist)navigator.storage.persist()}catch(e){}
 if("serviceWorker" in navigator)addEventListener("load",()=>navigator.serviceWorker.register("sw.js").catch(()=>{}));
