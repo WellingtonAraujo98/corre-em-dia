@@ -1,6 +1,6 @@
 # Corre em Dia
 
-App de bolso para organizar contas de quem trabalha com entregas.
+App de bolso para organizar contas mensais, semanais.
 
 - **Semana**: o que pagar de segunda a domingo, o que ficou para trás e o que dá para adiantar.
 - **Contas**: gastos de toda semana, bloco do dia 15 (meta: pagar no dia 1) e bloco do dia 30
